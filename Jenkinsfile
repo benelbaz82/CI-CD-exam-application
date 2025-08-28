@@ -1,48 +1,66 @@
 pipeline {
   agent any
+  environment {
+    AWS_REGION = 'us-east-1'
+    APP_REPO   = 'ben-cicd'  
+  }
 
   stages {
     stage('Checkout') {
-      steps {
-        checkout scm
-        sh 'echo "Checked out $BRANCH_NAME"'
-      }
+      steps { checkout scm }
     }
 
-    stage('CI tests (PR)') {
+    stage('Build Image (PR)') {
       when { changeRequest() }
-      agent { docker { image 'python:3.11' } } 
+      agent { docker { image 'docker:24.0-cli'; args '-v /var/run/docker.sock:/var/run/docker.sock' } }
       steps {
         sh '''
           set -e
-          python --version
-          pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-          pip install pytest
-          pytest -q --maxfail=1 --disable-warnings --junitxml=test-report.xml
+          apk add --no-cache python3 py3-pip >/dev/null
+          pip3 install --no-cache-dir awscli >/dev/null
+
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REGISTRY=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+          IMAGE=$ECR_REGISTRY/$APP_REPO:pr-$CHANGE_ID-$BUILD_NUMBER
+
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+          docker build -t $IMAGE .
+          echo $IMAGE > .image_ref 
         '''
       }
-      post {
-        always {
-          junit 'test-report.xml'
-          archiveArtifacts artifacts: 'test-report.xml', onlyIfSuccessful: false
-        }
-      }
     }
 
-    stage('CD on master (placeholder)') {
-      when { branch 'master' }  
+    stage('Test (PR)') {
+      when { changeRequest() }
+      agent { docker { image 'docker:24.0-cli'; args '-v /var/run/docker.sock:/var/run/docker.sock' } }
       steps {
-        sh 'echo "Deploy placeholder on master (נממש בחלק D)"'
+        sh '''
+          set -e
+          docker run --rm -v "$PWD":/workspace -w /workspace python:3.11 /bin/sh -lc '
+            set -e
+            pip install --upgrade pip
+            if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+            pip install pytest
+            pytest -q --maxfail=1 --disable-warnings
+          '
+        '''
       }
     }
-  }
 
-  post {
-    always {
-      echo "Pipeline finished for branch: ${env.BRANCH_NAME}"
+    stage('Push to ECR (PR)') {
+      when { changeRequest() }
+      agent { docker { image 'docker:24.0-cli'; args '-v /var/run/docker.sock:/var/run/docker.sock' } }
+      steps {
+        sh '''
+          set -e
+          IMAGE=$(cat .image_ref)
+          ECR_REGISTRY=$(echo $IMAGE | cut -d/ -f1)
+
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+          docker push $IMAGE
+          echo "Pushed: $IMAGE"    
+        '''
+      }
     }
-  }
 }
