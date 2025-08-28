@@ -9,22 +9,33 @@ pipeline {
       }
     }
 
-    stage('CI on PR') {
-      when { changeRequest() }   
+    stage('CI tests (PR)') {
+      when { changeRequest() }
+      agent { docker { image 'python:3.11' } } 
       steps {
         sh '''
-          echo " Running tests for PR..."
-          echo "pretend-tests passed"
+          set -e
+          python --version
+          pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install pytest
+          pytest -q --maxfail=1 --disable-warnings --junitxml=test-report.xml
         '''
+      }
+      post {
+        always {
+          junit 'test-report.xml'
+          archiveArtifacts artifacts: 'test-report.xml', onlyIfSuccessful: false
+        }
       }
     }
 
     stage('CD on master (placeholder)') {
       when { branch 'master' }  
       steps {
-        sh '''
-          echo "Deploy placeholder on master (will implement next)"
-        '''
+        sh 'echo "Deploy placeholder on master (נממש בחלק D)"'
       }
     }
   }
